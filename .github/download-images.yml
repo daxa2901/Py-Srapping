@@ -1,0 +1,31 @@
+name: Download Images from Google Sheet
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download-images:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Script
+        run: |
+          python image_downloader.py
+
+      - name: Upload ZIP Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: images-zip
+          path: images/
