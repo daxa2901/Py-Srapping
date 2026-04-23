@@ -1,0 +1,34 @@
+name: Item Scraping
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: item-scrapping
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Run scraper
+        env:
+          ZYTE_API_KEY: ${{ secrets.ZYTE_API_KEY }}
+        run: python app.py
+
+      - name: Upload output
+        uses: actions/upload-artifact@v4
+        with:
+          name: item-output
+          path: item-scrapping/item_output.csv
