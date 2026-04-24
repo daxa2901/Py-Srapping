@@ -428,8 +428,15 @@ def process(domain):
 # -------------------------------
 def mergeCsv():
     frames = []
-    for domain in os.listdir(OUTPUT_BASE):
-        v1_path = os.path.join(OUTPUT_BASE, domain, f"{domain}_v1.csv")
+    # Support both flat (artifact download) and nested (local) layouts
+    for entry in os.listdir(OUTPUT_BASE):
+        entry_path = os.path.join(OUTPUT_BASE, entry)
+        if os.path.isdir(entry_path):
+            v1_path = os.path.join(entry_path, f"{entry}_v1.csv")
+        elif entry.endswith("_v1.csv"):
+            v1_path = entry_path
+        else:
+            continue
         if os.path.exists(v1_path):
             frames.append(pd.read_csv(v1_path))
             print(f"[MERGE] Including {v1_path}")
@@ -454,8 +461,10 @@ if __name__ == "__main__":
 
     if cmd == "prepare":
         domains = prepare()
-        # Print domain list as JSON for workflow matrix
-        print("DOMAINS=" + json.dumps(domains))
+        # Write domains JSON to file for workflow to read
+        with open("domains.json", "w") as f:
+            json.dump(domains, f)
+        print("Domains written to domains.json")
 
     elif cmd == "process":
         domain = sys.argv[2]
