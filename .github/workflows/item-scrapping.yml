@@ -23,7 +23,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: sudo pip install -r requirements.txt
 
       - name: Split CSV by domain
         id: split
@@ -68,10 +68,10 @@ jobs:
             libxrandr2 xvfb
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: sudo pip install -r requirements.txt
 
       - name: Install Playwright browser
-        run: playwright install chromium
+        run: sudo playwright install chromium
 
       - name: Download domain CSVs
         uses: actions/download-artifact@v4
@@ -108,7 +108,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: sudo pip install -r requirements.txt
 
       - name: Download all v1 artifacts
         uses: actions/download-artifact@v4
