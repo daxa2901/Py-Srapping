@@ -4,7 +4,97 @@ on:
   workflow_dispatch:
 
 jobs:
-  scrape:
+  # -------------------------------------------------------
+  # Step 1: Split item.csv into per-domain CSV files
+  # -------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: item-scrapping
+    outputs:
+      domains: ${{ steps.split.outputs.domains }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Split CSV by domain
+        id: split
+        run: |
+          OUTPUT=$(python app.py prepare | grep '^DOMAINS=' | cut -d'=' -f2-)
+          echo "domains=$OUTPUT" >> $GITHUB_OUTPUT
+
+      - name: Upload domain CSVs
+        uses: actions/upload-artifact@v4
+        with:
+          name: domain-csvs
+          path: item-scrapping/output/
+
+  # -------------------------------------------------------
+  # Step 2: Scrape each domain simultaneously
+  # -------------------------------------------------------
+  process:
+    needs: prepare
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: item-scrapping
+    strategy:
+      fail-fast: false
+      matrix:
+        domain: ${{ fromJson(needs.prepare.outputs.domains) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2t64 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+            libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
+            libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 \
+            libxrandr2 xvfb
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: playwright install chromium
+
+      - name: Download domain CSVs
+        uses: actions/download-artifact@v4
+        with:
+          name: domain-csvs
+          path: item-scrapping/output/
+
+      - name: Scrape ${{ matrix.domain }}
+        env:
+          ZYTE_API_KEY: ${{ secrets.ZYTE_API_KEY }}
+        run: python app.py process ${{ matrix.domain }}
+
+      - name: Upload v1 result
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1-${{ matrix.domain }}
+          path: item-scrapping/output/${{ matrix.domain }}/${{ matrix.domain }}_v1.csv
+
+  # -------------------------------------------------------
+  # Step 3: Merge all v1 CSVs into final output
+  # -------------------------------------------------------
+  merge:
+    needs: process
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -17,18 +107,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          sudo apt-get install -y libasound2t64
-          playwright install chromium --with-deps
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
 
-      - name: Run scraper
-        env:
-          ZYTE_API_KEY: ${{ secrets.ZYTE_API_KEY }}
-        run: python app.py
+      - name: Download all v1 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v1-*
+          path: item-scrapping/output/
+          merge-multiple: true
 
-      - name: Upload output
+      - name: Merge into item_output.csv
+        run: python app.py merge
+
+      - name: Upload final output
         uses: actions/upload-artifact@v4
         with:
           name: item-output

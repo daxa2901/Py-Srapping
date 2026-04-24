@@ -21,7 +21,7 @@ DOMAIN_FETCH_MODE = {
     "bisonoffice.com": "requests",
     "cymax.com": "zyte",
     "homesquare.com": "zyte",
-    "diningroomsoutlet.com" :"requests",
+    "diningroomsoutlet.com" :"zyte",
     "bedroomfurniturediscounts.com" : "zyte",
     "emmamason.com" : "zyte",
     "homegallerystores.com": "zyte",
@@ -106,7 +106,7 @@ DOMAIN_SELECTORS = {
             "#maincontent > section > main > div.flex.flex-column.h-100 > div:nth-child(3) > div > div.GridColumn_gridColumn__a_mwP.GridColumn_gutter__wx4JI.GridColumn_small9__bUTRL > div > div > div:nth-child(6)",
 
         ],
-        "image" : ["#maincontent > section > main > div.flex.flex-column.h-100 > div:nth-child(2) > div > div.GridColumn_gridColumn__a_mwP.GridColumn_gutter__wx4JI.GridColumn_small5__W1Pll > div > div > section > div:nth-child(1) > div.container.overflow-y-hidden.mb0"]
+        "image" : ["#maincontent > main > section > div.flex.flex-column.h-100 > div:nth-child(2) > div > div.GridColumn_gridColumn__a_mwP.GridColumn_gutter__wx4JI.GridColumn_small5__W1Pll > div > div > section > div:nth-child(1) > div.container.overflow-y-hidden.mb0"]
     }
 }
 
@@ -122,19 +122,25 @@ DOMAIN_WAIT_SELECTOR = {
     domain: cfg["title"][0] for domain, cfg in DOMAIN_SELECTORS.items() if "title" in cfg
 }
 
+# First selector of "image" used to wait until image container is in DOM
+DOMAIN_IMAGE_SELECTOR = {
+    domain: cfg["image"][0] for domain, cfg in DOMAIN_SELECTORS.items() if "image" in cfg
+}
+
 def get_domain_config(url):
     domain = get_domain(url)
-    selectors, fetch_mode, wait_sel = None, "requests", None
+    selectors, fetch_mode, wait_sel, img_sel = None, "requests", None, None
     for key in DOMAIN_SELECTORS:
         if key in domain:
             selectors = DOMAIN_SELECTORS[key]
             wait_sel = DOMAIN_WAIT_SELECTOR.get(key)
+            img_sel = DOMAIN_IMAGE_SELECTOR.get(key)
             break
     for key in DOMAIN_FETCH_MODE:
         if key in domain:
             fetch_mode = DOMAIN_FETCH_MODE[key]
             break
-    return selectors, fetch_mode, wait_sel
+    return selectors, fetch_mode, wait_sel, img_sel
 
 def fetch_html_requests(url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
@@ -149,21 +155,57 @@ STEALTH_INIT_SCRIPT = """
     window.chrome = {runtime: {}};
 """
 
-SCROLL_JS = """
-    () => new Promise(resolve => {
-        const step = 400, delay = 120;
-        let y = 0;
-        const tick = () => {
-            window.scrollTo(0, y);
-            y += step;
-            if (y <= document.body.scrollHeight) setTimeout(tick, delay);
-            else { window.scrollTo(0, 0); setTimeout(resolve, 1500); }
-        };
-        tick();
-    })
+EXPAND_JS = """
+    () => {
+        const triggers = document.querySelectorAll(
+            '[data-toggle="collapse"], .accordion-header, .accordion-button, ' +
+            '.tab-label, [aria-expanded="false"], .expand-collapse-content button, ' +
+            '.Collapse_collapse__Ja6XL button, details:not([open]) summary'
+        );
+        triggers.forEach(el => { try { el.click(); } catch(e) {} });
+    }
 """
 
-def _playwright_fetch(url, wait_selector=None):
+SCROLL_JS = """
+    async () => {
+        await new Promise(resolve => {
+            let lastHeight = 0;
+            let unchangedCount = 0;
+            const step = 300, delay = 150;
+            let y = 0;
+            const tick = () => {
+                window.scrollTo(0, y);
+                y += step;
+                const currentHeight = document.body.scrollHeight;
+                if (y <= currentHeight) {
+                    if (currentHeight === lastHeight) unchangedCount++;
+                    else { unchangedCount = 0; lastHeight = currentHeight; }
+                    setTimeout(tick, delay);
+                } else {
+                    window.scrollTo(0, 0);
+                    setTimeout(resolve, 2000);
+                }
+            };
+            tick();
+        });
+    }
+"""
+
+WAIT_FOR_IMAGES_JS = """
+    async (imgSelector) => {
+        const container = document.querySelector(imgSelector);
+        if (!container) return;
+        const imgs = Array.from(container.querySelectorAll('img'));
+        await Promise.all(imgs.map(img => new Promise(resolve => {
+            if (img.complete && img.naturalWidth > 0) return resolve();
+            img.addEventListener('load', resolve);
+            img.addEventListener('error', resolve);
+            setTimeout(resolve, 5000);
+        })));
+    }
+"""
+
+def _playwright_fetch(url, wait_selector=None, img_selector=None):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -189,14 +231,30 @@ def _playwright_fetch(url, wait_selector=None):
                 page.wait_for_selector(wait_selector, timeout=10000)
             except Exception:
                 pass
+        page.evaluate(EXPAND_JS)
+        page.wait_for_timeout(500)
         page.evaluate(SCROLL_JS)
-        page.wait_for_timeout(2000)
+        # Wait for lazy-triggered network requests to settle
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        # Scroll image container into view and wait for all images to fully load
+        if img_selector:
+            try:
+                page.wait_for_selector(img_selector, timeout=10000)
+                page.evaluate(f"document.querySelector('{img_selector}')?.scrollIntoView({{behavior:'smooth',block:'center'}})")
+                page.wait_for_timeout(1000)
+                page.evaluate(WAIT_FOR_IMAGES_JS, img_selector)
+            except Exception:
+                pass
+        page.wait_for_timeout(1500)
         html = page.content()
         browser.close()
     return html
 
-def fetch_html_js(url):
-    return _playwright_fetch(url)
+def fetch_html_js(url, img_selector=None):
+    return _playwright_fetch(url, img_selector=img_selector)
 
 def _zyte_browser_html(url):
     import base64
@@ -206,6 +264,7 @@ def _zyte_browser_html(url):
         json={"url": url, "browserHtml": True},
         timeout=60,
     )
+
     if response.status_code == 200:
         return response.json().get("browserHtml", "")
     if response.status_code == 422:
@@ -220,29 +279,41 @@ def _zyte_browser_html(url):
     response.raise_for_status()
     return ""
 
-def fetch_html_zyte(url, wait_sel=None):
+def is_captcha_page(html: str) -> bool:
+    """Detect AWS WAF CAPTCHA / bot-block pages."""
+    return any(marker in html for marker in (
+        "awswaf",
+        "AwsWafIntegration",
+        "CaptchaScript.renderCaptcha",
+        "Let's confirm you are human",
+        "challenge.js",
+    ))
+
+def fetch_html_zyte(url, wait_sel=None, img_sel=None):
     """Try Playwright first (full JS render + scroll). Fall back to Zyte API if blocked."""
     try:
-        html = _playwright_fetch(url, wait_sel)
-        soup = BeautifulSoup(html, "html.parser")
-        # If page looks like a bot-block / empty, fall back to Zyte
-        body_text = soup.get_text(" ", strip=True)
-        if len(body_text) > 500:
-            return html
-        print(f"[PLAYWRIGHT thin response, falling back to Zyte] {url}")
+        html = _playwright_fetch(url, wait_sel, img_selector=img_sel)
+        if is_captcha_page(html):
+            print(f"[PLAYWRIGHT CAPTCHA detected, falling back to Zyte] {url}")
+        else:
+            soup = BeautifulSoup(html, "html.parser")
+            body_text = soup.get_text(" ", strip=True)
+            if len(body_text) > 500:
+                return html
+            print(f"[PLAYWRIGHT thin response, falling back to Zyte] {url}")
     except Exception as e:
         print(f"[PLAYWRIGHT failed, falling back to Zyte] {e}")
     return _zyte_browser_html(url)
 
-def fetch_html(url, mode, wait_sel=None):
+def fetch_html(url, mode, wait_sel=None, img_sel=None):
     if mode == "js":
-        return _playwright_fetch(url, wait_sel)
+        return _playwright_fetch(url, wait_sel, img_selector=img_sel)
     elif mode == "zyte":
-        return fetch_html_zyte(url, wait_sel)
+        return fetch_html_zyte(url, wait_sel, img_sel=img_sel)
     return fetch_html_requests(url)
 
-def scrape_to_json(url, selectors, fetch_mode, wait_sel=None):
-    html = fetch_html(url, fetch_mode, wait_sel)
+def scrape_to_json(url, selectors, fetch_mode, wait_sel=None, img_sel=None):
+    html = fetch_html(url, fetch_mode, wait_sel, img_sel)
     soup = BeautifulSoup(html, "html.parser")
     result = {}
 
@@ -259,11 +330,21 @@ def scrape_to_json(url, selectors, fetch_mode, wait_sel=None):
             continue
 
         if key == "image":
-            IMG_ATTRS = ["src", "data-src", "data-lazy-src", "data-original", "data-lazy", "data-image", "data-full-src"]
+            IMG_ATTRS = [
+                "data-zoom-image", "data-large-image", "data-full-src",
+                "data-src", "data-lazy-src", "data-original", "data-lazy",
+                "data-image", "src"
+            ]
             img_idx = 0
             for el in elements:
                 for img in el.select("img"):
-                    src = next((img.get(a) for a in IMG_ATTRS if img.get(a) and not img.get(a, "").startswith("data:")), None)
+                    src = next(
+                        (img.get(a) for a in IMG_ATTRS
+                         if img.get(a)
+                         and not img.get(a, "").startswith("data:")
+                         and img.get(a, "").strip()),
+                        None
+                    )
                     if not src:
                         srcset = img.get("srcset", "")
                         src = srcset.split(",")[-1].strip().split(" ")[0] if srcset else None
@@ -283,37 +364,108 @@ def scrape_to_json(url, selectors, fetch_mode, wait_sel=None):
 
     return result
 
-# -------------------------------
-# Load CSV
-# -------------------------------
-df = pd.read_csv("item.csv")
-competitor_data_col = []
-
-for _, row in df.iterrows():
-    comp_url = row["comp_url"]
-    selectors, fetch_mode, wait_sel = get_domain_config(comp_url)
-
-    if not selectors:
-        print(f"[SKIP] No config for domain: {get_domain(comp_url)}")
-        competitor_data_col.append("")
-        continue
-
-    try:
-        result = scrape_to_json(comp_url, selectors, fetch_mode, wait_sel)
-        competitor_data_col.append(json.dumps(result, ensure_ascii=False))
-        print(f"[OK] {row['web_id']} — {get_domain(comp_url)} — mode:{fetch_mode}")
-    except Exception as e:
-        competitor_data_col.append("")
-        print(f"[FAIL] {row['web_id']} — {e}")
+OUTPUT_BASE = "output"
 
 # -------------------------------
-# Output CSV
+# Prepare — split item.csv domain-wise
 # -------------------------------
-df["competitor_data"] = competitor_data_col
+def prepare(input_csv="item.csv"):
+    df = pd.read_csv(input_csv)
+    domain_files = {}
 
-output_file = "item_output.csv"
-if os.path.exists(output_file):
-    os.remove(output_file)
+    for _, row in df.iterrows():
+        domain = get_domain(str(row["comp_url"]))
+        if not domain:
+            continue
+        folder = os.path.join(OUTPUT_BASE, domain)
+        os.makedirs(folder, exist_ok=True)
+        domain_files.setdefault(domain, []).append(row)
 
-df.to_csv(output_file, index=False)
-print(f"\nSaved to {output_file}")
+    for domain, rows in domain_files.items():
+        folder = os.path.join(OUTPUT_BASE, domain)
+        path = os.path.join(folder, f"{domain}.csv")
+        pd.DataFrame(rows).to_csv(path, index=False)
+        print(f"[PREPARE] {domain} — {len(rows)} items → {path}")
+
+    return list(domain_files.keys())
+
+# -------------------------------
+# Process — scrape each domain file
+# -------------------------------
+def process(domain):
+    input_path = os.path.join(OUTPUT_BASE, domain, f"{domain}.csv")
+    if not os.path.exists(input_path):
+        print(f"[PROCESS] File not found: {input_path}")
+        return
+
+    df = pd.read_csv(input_path)
+    competitor_data_col = []
+
+    for _, row in df.iterrows():
+        comp_url = row["comp_url"]
+        selectors, fetch_mode, wait_sel, img_sel = get_domain_config(comp_url)
+
+        if not selectors:
+            print(f"[SKIP] No config for domain: {get_domain(comp_url)}")
+            competitor_data_col.append("")
+            continue
+
+        try:
+            result = scrape_to_json(comp_url, selectors, fetch_mode, wait_sel, img_sel)
+            competitor_data_col.append(json.dumps(result, ensure_ascii=False))
+            print(f"[OK] {row['web_id']} — {domain} — mode:{fetch_mode}")
+        except Exception as e:
+            competitor_data_col.append("")
+            print(f"[FAIL] {row['web_id']} — {e}")
+
+    df["competitor_data"] = competitor_data_col
+    output_path = os.path.join(OUTPUT_BASE, domain, f"{domain}_v1.csv")
+    df.to_csv(output_path, index=False)
+    print(f"[PROCESS] Done — {domain} → {output_path}")
+
+# -------------------------------
+# MergeCsv — merge all *_v1.csv into item_output.csv
+# -------------------------------
+def mergeCsv():
+    frames = []
+    for domain in os.listdir(OUTPUT_BASE):
+        v1_path = os.path.join(OUTPUT_BASE, domain, f"{domain}_v1.csv")
+        if os.path.exists(v1_path):
+            frames.append(pd.read_csv(v1_path))
+            print(f"[MERGE] Including {v1_path}")
+
+    if not frames:
+        print("[MERGE] No v1 files found.")
+        return
+
+    merged = pd.concat(frames, ignore_index=True)
+    output_file = "item_output.csv"
+    if os.path.exists(output_file):
+        os.remove(output_file)
+    merged.to_csv(output_file, index=False)
+    print(f"[MERGE] Saved {len(merged)} rows → {output_file}")
+
+# -------------------------------
+# Entry point
+# -------------------------------
+if __name__ == "__main__":
+    import sys
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "all"
+
+    if cmd == "prepare":
+        domains = prepare()
+        # Print domain list as JSON for workflow matrix
+        print("DOMAINS=" + json.dumps(domains))
+
+    elif cmd == "process":
+        domain = sys.argv[2]
+        process(domain)
+
+    elif cmd == "merge":
+        mergeCsv()
+
+    else:
+        domains = prepare()
+        for domain in domains:
+            process(domain)
+        mergeCsv()
